@@ -26,10 +26,10 @@ public:
 
 	// declaration of each job
 	struct Declaration {
-		EntryPoint* m_pEntryPoint = nullptr;
-		void*		m_param		  = nullptr;
-		Priority	m_priority	  = Priority::LOW;
-		Counter*	m_pCounter    = nullptr;
+		EntryPoint* m_pEntryPoint  = nullptr;
+		void*		m_param	   = nullptr;
+		Priority	m_priority = Priority::LOW;
+		Counter*	m_pCounter = nullptr;
 	};
 
 	// kick jobs
@@ -51,7 +51,7 @@ public:
 #include <iostream>		// std::cout
 #include <string>		// std::string
 
-#include "JobSystem.h"	// JobSystem
+#include "JobSystem.h"		// JobSystem
 
 JobSystem g_jobSystem;
 

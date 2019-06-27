@@ -1,7 +1,7 @@
 # Fiber based Job System
 
 Fiber based job system, based on:  
-Christian Gyrling's GDC talk: [Parallelizing the Naughty Dog Engine](https://www.gdcvault.com/play/1022186/Parallelizing-the-Naughty-Dog-Engine)  
+Christian Gyrling's GDC talk: [Parallelizing the Naughty Dog Engine Using Fibers](https://www.gdcvault.com/play/1022186/Parallelizing-the-Naughty-Dog-Engine)  
 [Game Engine Architecture 3rd Edition](https://www.gameenginebook.com/)
 
 Implementation is for Windows only.  

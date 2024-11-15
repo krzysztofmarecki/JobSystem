@@ -4,8 +4,6 @@ thread_local U32						tl_workerThreadId = -1;
 thread_local PFiber						tl_pCurrentFiber = nullptr;
 thread_local PFiber						tl_pFiberToBeAddedToPoolAfterSwitch = nullptr;
 thread_local StatefullFiber*			tl_pStatefullFiberToBeUnlockedAfterSwitch = nullptr;
-thread_local JobSystem::Declaration*	tl_pJobsToBeKicked = nullptr;
-thread_local int						tl_numberOfJobsToBeKicked = 0;
 
 // the only point of this class is because someone can KickJobs (without Wait) with global counter, and WaitForCounter can be called somewhere else
 // and in order to prevent unfortunate situation, when counter gets decremented to 0 after waiting fiber is added to wait list, but before that waiting fiber switched to another 
@@ -31,12 +29,6 @@ void WorkerMainLoop(void* job_system) {
 		if (tl_pStatefullFiberToBeUnlockedAfterSwitch != nullptr) {
 			tl_pStatefullFiberToBeUnlockedAfterSwitch->m_lock.unlock();
 			tl_pStatefullFiberToBeUnlockedAfterSwitch = nullptr;
-		}
-		if (tl_numberOfJobsToBeKicked != 0) {
-			jobSystem.KickJobs(tl_numberOfJobsToBeKicked, tl_pJobsToBeKicked);
-
-			tl_pJobsToBeKicked = nullptr;
-			tl_numberOfJobsToBeKicked = 0;
 		}
 
 		// pull the job from queue
@@ -190,28 +182,8 @@ void JobSystem::KickJobsAndWait(int count, Declaration aDecl[])
 	for (size_t i = 0; i < count; i++) {
 		aDecl[i].m_pCounter = &counter;
 	}
-	
-	// set job to be kicked by fiber we will switch to (in WaitForCounter)
-	tl_pJobsToBeKicked = &aDecl[0];
-	tl_numberOfJobsToBeKicked = count;
-	
-	StatefullFiber statefullFiber(tl_pCurrentFiber); // we don't take the lock, because in this scenario we switch before jobs are kicked
-
-	// add itself to wait list
-	assert(tl_pCurrentFiber != nullptr);
-	m_waitListLock.lock();
-	m_waitList[&counter] = &statefullFiber;
-	m_waitListLock.unlock();
-
-	// pop free fiber
-	std::optional<PFiber> newFiber = m_pFiberPool->PopFront();
-	assert(newFiber.has_value());
-	tl_pCurrentFiber = newFiber.value();
-	// do not add ourselft to tl_pFiberToBeAddedToPoolAfterSwitch, because we go to wait list
-
-	::SwitchToFiber(newFiber.value());
-
-	AddPreviousFiberToPool();
+	KickJobs(count, aDecl);
+	WaitForCounter(&counter);
 }
 
 void JobSystem::Initialize(U32 numberOfThreads)

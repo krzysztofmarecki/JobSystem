@@ -25,14 +25,13 @@ void TheMostCreativeWayToCalculateFibonacci(void* pNumberVoid) {
 }
 
 int main() {
-	int numberOfThreads = std::thread::hardware_concurrency();
+	const int numberOfThreads = std::thread::hardware_concurrency();
 	g_jobSystem.Initialize(numberOfThreads);
 	int n = 11;
 	JobSystem::Declaration decl;
 	decl.m_pEntryPoint = TheMostCreativeWayToCalculateFibonacci;
 	decl.m_param = &n;
-	g_jobSystem.KickJob(decl);
+	g_jobSystem.KickJobAndWait(decl);
 
-	g_jobSystem.Join();
-	g_jobSystem.Terminate();
+	g_jobSystem.JoinAndTerminate();
 }

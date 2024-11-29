@@ -18,28 +18,27 @@ const size_t g_sJobQueue = 1024;
 const size_t g_sFiberPool = 160;
 const size_t g_sWaitList = g_sFiberPool;
 using PFiber = LPVOID;
-class StatefullFiber;
 
 class JobSystem {
 public:
 	// entry point for each job
 	using EntryPoint = void(void* param);
 
-	// counter used for synchronizng jobs
-	using Counter = std::atomic<I32>;
-
 	// jobs' priority
 	enum class Priority {
 		LOW = 0, NORMAL = 1, HIGH = 2
 	};
 
+	class Counter;
+
 	// declaration of each job
 	struct Declaration {
-		EntryPoint* m_pEntryPoint = nullptr;
-		void*		m_param		  = nullptr;
-		Priority	m_priority	  = Priority::LOW;
-		Counter*	m_pCounter    = nullptr;
+		EntryPoint*			m_pEntryPoint = nullptr;
+		void*				m_param = nullptr;
+		Priority			m_priority = Priority::LOW;
+		JobSystem::Counter*	m_pCounter = nullptr;
 	};
+
 
 	// kick jobs
 	void KickJob(const Declaration& decl);
@@ -59,19 +58,18 @@ public:
 
 	// for easy control of initialization and shut down order
 	void Initialize(U32 numberOfThreads);
-	void Terminate();
-
-	// convenient function, so main thread can politely wait
-	void Join() {
-		for (std::thread& thread : m_workers)
-			thread.join();
-	}
+	void JoinAndTerminate();
 
 private:
 	std::optional<Declaration> PullJob();
 	void AddPreviousFiberToPool(); // this is meant to be used only in waiting functions: KickJob(s)AndWait, WaitforCounter
+	void WaitForCounterFromFiber(Counter* pCounter);
+
+	static bool IsThisThreadAFiber();
+
 	friend void WorkerMainLoop(void*); // PullJob
 	friend void JobWrapper(JobSystem::Declaration declaration, JobSystem& rJobSystem); // m_waitList, m_waitListLock
+
 	RingBuffer<Declaration, g_sJobQueue+1>*				m_pJobQueueLow = nullptr;
 	RingBuffer<Declaration, g_sJobQueue+1>*				m_pJobQueueNormal = nullptr;
 	RingBuffer<Declaration, g_sJobQueue+1>*				m_pJobQueueHigh = nullptr;
@@ -80,4 +78,28 @@ private:
 	std::unordered_map<Counter*, class StatefullFiber*>	m_waitList;
 	alignas(64) SpinLock								m_waitListLock;
 	std::atomic<bool>									m_keepWorking = true;
+
+
+public:
+	// counter used for synchronizng jobs
+	class Counter {
+		std::atomic<I32>		m_counter;
+
+		// whether fiber->thread notify is needed after m_counter reaches 0
+		bool					m_signalAfterCompletion = false;
+
+		// used only if needed for fiber->thread communication
+		std::mutex				m_mutex;
+		std::condition_variable m_condVar;
+
+		I32 GetCounter() const { return m_counter; }
+		void Wait();
+
+		friend void JobWrapper(JobSystem::Declaration declaration, JobSystem& rJobSystem); // GetCounter, NotifyIfNeeded 
+		friend void JobSystem::KickJob(const Declaration& decl); // assert SignalAfterCompetion
+		friend void JobSystem::WaitForCounter(Counter* pCounter); // Wait()
+		friend void JobSystem::WaitForCounterFromFiber(Counter* pCounter); // GetCounter
+	public:
+		explicit Counter(I32 counter) : m_counter(counter), m_signalAfterCompletion(!JobSystem::IsThisThreadAFiber()) {}
+	};
 };

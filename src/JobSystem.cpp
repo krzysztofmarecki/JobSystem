@@ -5,17 +5,16 @@ thread_local PFiber						tl_pCurrentFiber = nullptr;
 thread_local PFiber						tl_pFiberToBeAddedToPoolAfterSwitch = nullptr;
 thread_local StatefullFiber*			tl_pStatefullFiberToBeUnlockedAfterSwitch = nullptr;
 
-// the only point of this class is because someone can KickJobs (without Wait) with global counter, and WaitForCounter can be called somewhere else
-// and in order to prevent unfortunate situation, when counter gets decremented to 0 after waiting fiber is added to wait list, but before that waiting fiber switched to another 
-// (pulled from fiber pool), we need this extra lock, that we take in WaitForCounter, and release in WorkerMainLoop after switch is performed
+// the only point of this class is because counter can get decremented to 0 after waiting fiber is added to wait list, but before that waiting fiber switched to another 
+// (pulled from fiber pool), so we need this extra lock that we take in WaitForCounter, and release in WorkerMainLoop after switch is performed, so we can go back to trully awaiting fiber
 class StatefullFiber {
 public:
 	explicit StatefullFiber(LPVOID pFiber) : m_pFiber(pFiber) {}
 	PFiber GetRawFiber() { return m_pFiber; }
 private:
-	friend void JobSystem::WaitForCounter(JobSystem::Counter*); // set lock before adding fiber to wait list
 	friend void WorkerMainLoop(void*);	// release the lock in main loop after switch was performed
-	friend void JobWrapper(JobSystem::Declaration declaration, JobSystem& rJobSystem); // take a lock and instantly release, lock() can spin in global lock scenario, but will immediately return in KickJob(s)AndWait scenario
+	friend void JobWrapper(JobSystem::Declaration declaration, JobSystem& rJobSystem); // GetRawFiber
+	friend class JobSystem; // whole class, because I can't make friend with private function from JobSystem, if this class isn't nested in JobSystem
 	PFiber m_pFiber;
 	SpinLock m_lock;
 };
@@ -54,9 +53,39 @@ void JobWrapper(JobSystem::Declaration declaration, JobSystem& rJobSystem) {
 	if (pCounter == nullptr)
 		return;
 
+	const bool wasCounterAddedToWaitList = !pCounter->m_signalAfterCompletion;
+
+	I32 newCounterValue;
+	{
+		if (pCounter->m_signalAfterCompletion) {
+			// notify needs to be under same lock as decrement because:
+			// 1. multiple workers can finish job at the same, decrement counter and get timesliced before they check if counter reached 0
+			// 2. one of them check that it's 0 and notify
+			// 3. the guy notified resumes and free Counter's memory
+			// 4. later, woken up other worker would checks whether released counter is 0, which could be "true" on garbage memory
+			// and then tries to do notify_all() on released conditional variable, that is in fact a garbage memory
+			std::lock_guard<std::mutex> lock(pCounter->m_mutex);
+			newCounterValue = --(pCounter->m_counter);
+			if (newCounterValue == 0)
+				pCounter->m_condVar.notify_all();
+		}
+		else {
+			newCounterValue = --(pCounter->m_counter);
+		}
+	}
+	// DEREFERENCING COUNTER PAST THIS LINE IS FORBIDDEN, AS IT MIGHT POINT TO RELEASED MEMORY IN FIBER->THREAD NOTIFY SCENARIO
+
+	if (!wasCounterAddedToWaitList) {
+#ifdef _DEBUG
+		rJobSystem.m_waitListLock.lock();
+		assert(rJobSystem.m_waitList.find(pCounter) == rJobSystem.m_waitList.end());
+		rJobSystem.m_waitListLock.unlock();
+#endif
+		return;
+	}
+
 	// decrement counter
-	--(*pCounter);
-	if (*pCounter == 0) {
+	if (newCounterValue == 0) {
 		rJobSystem.m_waitListLock.lock();
 		auto foundIterator = rJobSystem.m_waitList.find(pCounter);
 		if (foundIterator != rJobSystem.m_waitList.end()) {
@@ -98,7 +127,13 @@ void JobWrapper(JobSystem::Declaration declaration, JobSystem& rJobSystem) {
 
 void JobSystem::KickJob(const Declaration & decl)
 {
-	// maybe assert(decl.m_pCounter != nulllptr); ? Dunno, maybe there is use case for that.
+	// jobs Kicked from non Fiber has to have m_signalAfterCompletion == true
+	// fire and forget jobs don't have counter
+#ifdef _DEBUG
+	if (!IsThisThreadAFiber() && decl.m_pCounter)
+		assert(decl.m_pCounter->m_signalAfterCompletion);
+#endif
+
 	if (decl.m_priority == Priority::LOW)
 		m_pJobQueueLow->PushBack(decl);
 	else if (decl.m_priority == Priority::NORMAL)
@@ -107,6 +142,11 @@ void JobSystem::KickJob(const Declaration & decl)
 		m_pJobQueueHigh->PushBack(decl);
 	else
 		assert(false && "UNHANDLED JOB PRIORITY");
+}
+
+bool JobSystem::IsThisThreadAFiber()
+{
+	return tl_pCurrentFiber != nullptr;
 }
 
 std::optional<JobSystem::Declaration> JobSystem::PullJob()
@@ -130,7 +170,17 @@ void JobSystem::AddPreviousFiberToPool()
 	tl_pFiberToBeAddedToPoolAfterSwitch = nullptr;
 }
 
-void JobSystem::WaitForCounter(Counter * pCounter)
+void JobSystem::WaitForCounter(Counter* pCounter)
+{
+	// fiber cannot wait on counter created on thread and vice versa
+	assert(pCounter->m_signalAfterCompletion == !IsThisThreadAFiber());
+	if (IsThisThreadAFiber())
+		WaitForCounterFromFiber(pCounter);
+	else
+		pCounter->Wait();
+}
+
+void JobSystem::WaitForCounterFromFiber(Counter * pCounter)
 {
 	StatefullFiber statefullFiber(tl_pCurrentFiber);
 	statefullFiber.m_lock.lock();
@@ -141,7 +191,7 @@ void JobSystem::WaitForCounter(Counter * pCounter)
 	m_waitList[pCounter] = &statefullFiber;
 	m_waitListLock.unlock();
 
-	if (*pCounter == 0) {
+	if (pCounter->GetCounter() == 0) {
 		std::lock_guard<SpinLock> guard(m_waitListLock);
 		// we are here in one of 2 scenarios:
 		// 1st - jobs was completed before we added ourselfs to wait list, or jobs were completed after we added ourselfs to wait list, but last job didn't take a m_waitListLock before us,
@@ -180,6 +230,7 @@ void JobSystem::KickJobsAndWait(int count, Declaration aDecl[])
 	Counter counter(count);
 
 	for (size_t i = 0; i < count; i++) {
+		assert(aDecl[i].m_pCounter == nullptr);
 		aDecl[i].m_pCounter = &counter;
 	}
 	KickJobs(count, aDecl);
@@ -200,7 +251,7 @@ void JobSystem::Initialize(U32 numberOfThreads)
 	m_workers.reserve(numberOfThreads);
 	m_waitList.reserve(g_sWaitList);
 	// init workers
-	for (size_t i = 0; i < numberOfThreads; i++) {
+	for (U32 i = 0; i < numberOfThreads; i++) {
 		m_workers.emplace_back([this, i] {
 			tl_workerThreadId = i;
 			tl_pCurrentFiber = ::ConvertThreadToFiber(nullptr);
@@ -215,16 +266,24 @@ void JobSystem::Initialize(U32 numberOfThreads)
 	}
 }
 
-void JobSystem::Terminate()
+void JobSystem::JoinAndTerminate()
 {
 	m_keepWorking = false;
-	for (std::thread& thread : m_workers)
-		if (thread.joinable())
-			thread.join();
+	for (std::thread& thread : m_workers) {
+		assert(thread.joinable());
+		thread.join();
+	}
 
 	delete m_pJobQueueLow;
 	delete m_pJobQueueNormal;
 	delete m_pJobQueueHigh;
 
 	delete m_pFiberPool;
+}
+
+void JobSystem::Counter::Wait()
+{
+	assert(!IsThisThreadAFiber());
+	std::unique_lock<std::mutex> lock(m_mutex);
+	m_condVar.wait(lock, [this] {return m_counter == 0; });
 }

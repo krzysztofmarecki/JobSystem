@@ -1,6 +1,8 @@
+
 # Fiber based Job System
 
-Fiber based job system, based on:  
+Fiber based job system, with additional ability for fiber->thread communication.
+Based on:  
 Christian Gyrling's GDC talk: [Parallelizing the Naughty Dog Engine Using Fibers](https://www.gdcvault.com/play/1022186/Parallelizing-the-Naughty-Dog-Engine)  
 [Game Engine Architecture 3rd Edition](https://www.gameenginebook.com/)
 
@@ -15,21 +17,23 @@ class JobSystem {
 public:
 	// entry point for each job
 	using EntryPoint = void(void* param);
-
-	// counter used for synchronizng jobs
-	using Counter = std::atomic<I32>;
-
+	
 	// jobs' priority
 	enum class Priority {
 		LOW = 0, NORMAL = 1, HIGH = 2
 	};
+	
+	// counter used for synchronizng jobs
+	class Counter {
+		explicit Counter(I32 counter);
+	};
 
 	// declaration of each job
 	struct Declaration {
-		EntryPoint* m_pEntryPoint  = nullptr;
-		void*		m_param	   = nullptr;
-		Priority	m_priority = Priority::LOW;
-		Counter*	m_pCounter = nullptr;
+		EntryPoint*			m_pEntryPoint = nullptr;
+		void*				m_param = nullptr;
+		Priority			m_priority = Priority::LOW;
+		JobSystem::Counter*	m_pCounter = nullptr;
 	};
 
 	// kick jobs
@@ -42,6 +46,10 @@ public:
 	// kick jobs and wait for completion
 	void KickJobAndWait(Declaration& decl);
 	void KickJobsAndWait(int count, Declaration aDecl[]);
+	
+	// for easy control of initialization and shut down order
+	void Initialize(U32 numberOfThreads);
+	void JoinAndTerminate();
 };
 
 ```
@@ -51,7 +59,7 @@ public:
 #include <iostream>		// std::cout
 #include <string>		// std::string
 
-#include "JobSystem.h"		// JobSystem
+#include "JobSystem.h"	// JobSystem
 
 JobSystem g_jobSystem;
 
@@ -75,16 +83,15 @@ void TheMostCreativeWayToCalculateFibonacci(void* pNumberVoid) {
 }
 
 int main() {
-	int numberOfThreads = std::thread::hardware_concurrency();
+	const int numberOfThreads = std::thread::hardware_concurrency();
 	g_jobSystem.Initialize(numberOfThreads);
 	int n = 11;
 	JobSystem::Declaration decl;
 	decl.m_pEntryPoint = TheMostCreativeWayToCalculateFibonacci;
 	decl.m_param = &n;
-	g_jobSystem.KickJob(decl);
+	g_jobSystem.KickJobAndWait(decl);
 
-	g_jobSystem.Join();
-	g_jobSystem.Terminate();
+	g_jobSystem.JoinAndTerminate();
 }
 
 ```

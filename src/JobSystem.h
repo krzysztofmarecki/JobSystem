@@ -41,20 +41,19 @@ public:
 
 
 	// kick jobs
-	void KickJob(const Declaration& decl);
-	void KickJobs(int count, const Declaration aDecl[]) {
-		for (size_t i = 0; i < count; i++)
-			KickJob(aDecl[i]);
+	void KickJobs(int count, const Declaration aDecl[]);
+	void KickJob(const Declaration& decl) {
+		KickJobs(1, &decl);
 	}
 	
 	// wait for counter to become 0
 	void WaitForCounter(Counter* pCounter);
 
 	// kick jobs and wait for completion
+	void KickJobsAndWait(int count, Declaration aDecl[]);
 	void KickJobAndWait(Declaration& decl) {
 		KickJobsAndWait(1, &decl);
 	}
-	void KickJobsAndWait(int count, Declaration aDecl[]);
 
 	// for easy control of initialization and shut down order
 	void Initialize(U32 numberOfThreads);
@@ -64,7 +63,9 @@ private:
 	std::optional<Declaration> PullJob();
 	void AddPreviousFiberToPool(); // this is meant to be used only in waiting functions: KickJob(s)AndWait, WaitforCounter
 	void WaitForCounterFromFiber(Counter* pCounter);
-
+	void KickJobWithoutNotifingWorkers(const Declaration& decl);
+	void NotifyOneWorker();
+	void NotifyAllWorkers();
 	static bool IsThisThreadAFiber();
 
 	friend void WorkerMainLoop(void*); // PullJob
@@ -77,7 +78,9 @@ private:
 	std::vector<std::thread>							m_workers;
 	std::unordered_map<Counter*, class StatefullFiber*>	m_waitList;
 	alignas(64) SpinLock								m_waitListLock;
-	std::atomic<bool>									m_keepWorking = true;
+	alignas(64) std::atomic<bool>						m_keepWorking = true;
+	std::mutex											m_workersMainLoopMutex;
+	std::condition_variable								m_workersMainLoopConditionVariable;
 
 
 public:
@@ -96,7 +99,7 @@ public:
 		void Wait();
 
 		friend void JobWrapper(JobSystem::Declaration declaration, JobSystem& rJobSystem); // GetCounter, NotifyIfNeeded 
-		friend void JobSystem::KickJob(const Declaration& decl); // assert SignalAfterCompetion
+		friend void JobSystem::KickJobWithoutNotifingWorkers(const Declaration& decl); // assert SignalAfterCompetion
 		friend void JobSystem::WaitForCounter(Counter* pCounter); // Wait()
 		friend void JobSystem::WaitForCounterFromFiber(Counter* pCounter); // GetCounter
 	public:

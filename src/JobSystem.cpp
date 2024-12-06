@@ -29,14 +29,27 @@ void WorkerMainLoop(void* job_system) {
 			tl_pStatefullFiberToBeUnlockedAfterSwitch->m_lock.unlock();
 			tl_pStatefullFiberToBeUnlockedAfterSwitch = nullptr;
 		}
-
-		// pull the job from queue
-		std::optional<JobSystem::Declaration> decl = jobSystem.PullJob();
+		std::optional<JobSystem::Declaration> decl;
+		for (int i = 0; i < 100; i++) {
+			decl = jobSystem.PullJob();
+			if (decl)
+				break;
+			else
+				_mm_pause();
+		}
+		
 		if (decl) {
 			JobWrapper(decl.value(), jobSystem);
 		}
 		else {
-			_mm_pause();
+			std::unique_lock<std::mutex> lock(jobSystem.m_workersMainLoopMutex);
+			jobSystem.m_workersMainLoopConditionVariable.wait(lock, [&jobSystem, &decl] { decl = jobSystem.PullJob(); return decl != std::nullopt || !jobSystem.m_keepWorking; });
+			
+			if (jobSystem.m_keepWorking) {
+				assert(decl);
+				lock.unlock();
+				JobWrapper(decl.value(), jobSystem);
+			}
 		}
 	}
 }
@@ -125,23 +138,15 @@ void JobWrapper(JobSystem::Declaration declaration, JobSystem& rJobSystem) {
 	}
 }
 
-void JobSystem::KickJob(const Declaration & decl)
+void JobSystem::KickJobs(int count, const Declaration aDecl[])
 {
-	// jobs Kicked from non Fiber has to have m_signalAfterCompletion == true
-	// fire and forget jobs don't have counter
-#ifdef _DEBUG
-	if (!IsThisThreadAFiber() && decl.m_pCounter)
-		assert(decl.m_pCounter->m_signalAfterCompletion);
-#endif
+	for (int i = 0; i < count; i++)
+		KickJobWithoutNotifingWorkers(aDecl[i]);
 
-	if (decl.m_priority == Priority::LOW)
-		m_pJobQueueLow->PushBack(decl);
-	else if (decl.m_priority == Priority::NORMAL)
-		m_pJobQueueNormal->PushBack(decl);
-	else if (decl.m_priority == Priority::HIGH)
-		m_pJobQueueHigh->PushBack(decl);
+	if (count > 1)
+		NotifyAllWorkers();
 	else
-		assert(false && "UNHANDLED JOB PRIORITY");
+		NotifyOneWorker();
 }
 
 bool JobSystem::IsThisThreadAFiber()
@@ -224,12 +229,42 @@ void JobSystem::WaitForCounterFromFiber(Counter * pCounter)
 	AddPreviousFiberToPool();
 }
 
+void JobSystem::KickJobWithoutNotifingWorkers(const Declaration& decl)
+{
+	assert(decl.m_pCounter);
+	assert(decl.m_pCounter->m_signalAfterCompletion == !IsThisThreadAFiber());
+
+	if (decl.m_priority == Priority::LOW)
+		m_pJobQueueLow->PushBack(decl);
+	else if (decl.m_priority == Priority::NORMAL)
+		m_pJobQueueNormal->PushBack(decl);
+	else if (decl.m_priority == Priority::HIGH)
+		m_pJobQueueHigh->PushBack(decl);
+	else
+		assert(false && "UNHANDLED JOB PRIORITY");
+}
+
+void JobSystem::NotifyOneWorker()
+{
+	// this lock is to ensure, that we won't miss notification when worker was about
+	// to put itself to sleep, but haven't done it yet
+	std::lock_guard<std::mutex> loc(m_workersMainLoopMutex);
+	m_workersMainLoopConditionVariable.notify_one();
+}
+
+void JobSystem::NotifyAllWorkers()
+{
+	// look at NotifyOneWorker comment
+	std::lock_guard<std::mutex> loc(m_workersMainLoopMutex);
+	m_workersMainLoopConditionVariable.notify_all();
+}
+
 
 void JobSystem::KickJobsAndWait(int count, Declaration aDecl[])
 {
 	Counter counter(count);
 
-	for (size_t i = 0; i < count; i++) {
+	for (int i = 0; i < count; i++) {
 		assert(aDecl[i].m_pCounter == nullptr);
 		aDecl[i].m_pCounter = &counter;
 	}
@@ -268,7 +303,13 @@ void JobSystem::Initialize(U32 numberOfThreads)
 
 void JobSystem::JoinAndTerminate()
 {
-	m_keepWorking = false;
+	{
+		std::lock_guard<std::mutex> lock(m_workersMainLoopMutex);
+		m_keepWorking = false;
+		m_workersMainLoopConditionVariable.notify_all();
+	}
+	
+
 	for (std::thread& thread : m_workers) {
 		assert(thread.joinable());
 		thread.join();

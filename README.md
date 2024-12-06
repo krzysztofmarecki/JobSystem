@@ -37,15 +37,15 @@ public:
 	};
 
 	// kick jobs
-	void KickJob(const Declaration& decl);
 	void KickJobs(int count, const Declaration aDecl[]);
+	void KickJob(const Declaration& decl);
 	
 	// wait for counter to become 0
 	void WaitForCounter(Counter* pCounter);
 
 	// kick jobs and wait for completion
-	void KickJobAndWait(Declaration& decl);
 	void KickJobsAndWait(int count, Declaration aDecl[]);
+	void KickJobAndWait(Declaration& decl);
 	
 	// for easy control of initialization and shut down order
 	void Initialize(U32 numberOfThreads);
@@ -79,23 +79,28 @@ void TheMostCreativeWayToCalculateFibonacci(void* pNumberVoid) {
 		n = fibNMinus1 + fibNMinus2;
 		*pNumber = n;
 	}
-	std::cout << n << "\n";
 }
 
 int main() {
 	const int numberOfThreads = std::thread::hardware_concurrency();
 	g_jobSystem.Initialize(numberOfThreads);
-	int n = 11;
-	JobSystem::Declaration decl;
-	decl.m_pEntryPoint = TheMostCreativeWayToCalculateFibonacci;
-	decl.m_param = &n;
-	g_jobSystem.KickJobAndWait(decl);
 
+	for (int i = 0; i < 2; i++) {
+		int n = 10+i;
+		printf("Fibonacci(%i)=", n);
+		JobSystem::Declaration decl;
+		decl.m_pEntryPoint = TheMostCreativeWayToCalculateFibonacci;
+		decl.m_param = &n;
+		g_jobSystem.KickJobAndWait(decl);
+		printf("%i\nSleeping for 10s...\n", n);
+		std::this_thread::sleep_for(std::chrono::seconds(10)); // to show that workers go to sleep
+	}
+
+	printf("Closing!\n");
 	g_jobSystem.JoinAndTerminate();
 }
 
 ```
-Last printed number is our Fibonacci number.  
 Higher numbers with kicking two jobs at the time will make you run out of fibers, so increase sizes of queues, fiber pool and wait list appropriately.
 
 ### Differences between GDC talk

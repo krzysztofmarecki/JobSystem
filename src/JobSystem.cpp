@@ -280,7 +280,7 @@ void JobSystem::Initialize(U32 numberOfThreads)
 	// init fiber pool
 	m_pFiberPool = new RingBuffer<PFiber, g_sFiberPool + 1>;
 	for (size_t i = 0; i < m_pFiberPool->Size(); i++)
-		m_pFiberPool->PushBack( ::CreateFiber(g_sKiBStack, (LPFIBER_START_ROUTINE)WorkerMainLoop, this) );
+		m_pFiberPool->PushBack( ::CreateFiberEx(g_sKiBStack, g_sKiBStack, 0, (LPFIBER_START_ROUTINE)WorkerMainLoop, this) );
 	// reserve memory for workers and fiberPool
 	m_workers.reserve(numberOfThreads);
 	m_waitList.reserve(g_sWaitList);

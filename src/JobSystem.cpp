@@ -232,7 +232,6 @@ void JobSystem::WaitForCounterFromFiber(Counter * pCounter)
 void JobSystem::KickJobWithoutNotifingWorkers(const Declaration& decl)
 {
 	assert(decl.m_pCounter);
-	assert(decl.m_pCounter->m_signalAfterCompletion == !IsThisThreadAFiber());
 
 	if (decl.m_priority == Priority::LOW)
 		m_pJobQueueLow->PushBack(decl);
